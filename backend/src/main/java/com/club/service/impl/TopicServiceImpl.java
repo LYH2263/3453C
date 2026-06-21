@@ -21,8 +21,11 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 @Service
 public class TopicServiceImpl extends ServiceImpl<TopicMapper, Topic> implements TopicService {
@@ -149,7 +152,46 @@ public class TopicServiceImpl extends ServiceImpl<TopicMapper, Topic> implements
         return Result.success(null);
     }
 
+    private Map<Integer, User> batchLoadAuthors(Set<Integer> authorIds) {
+        if (authorIds == null || authorIds.isEmpty()) return new HashMap<>();
+        List<User> users = userMapper.selectBatchIds(authorIds);
+        return users.stream().collect(Collectors.toMap(User::getId, u -> u, (a, b) -> a));
+    }
+
+    private Map<Integer, Club> batchLoadClubs(Set<Integer> clubIds) {
+        if (clubIds == null || clubIds.isEmpty()) return new HashMap<>();
+        List<Club> clubs = clubMapper.selectBatchIds(clubIds);
+        return clubs.stream().collect(Collectors.toMap(Club::getId, c -> c, (a, b) -> a));
+    }
+
+    private Map<Integer, Set<String>> batchLoadUserInteractions(Integer userId, Set<Integer> topicIds) {
+        Map<Integer, Set<String>> result = new HashMap<>();
+        if (userId == null || topicIds == null || topicIds.isEmpty()) return result;
+        List<TopicInteraction> interactions = topicInteractionMapper.selectList(
+                new LambdaQueryWrapper<TopicInteraction>()
+                        .eq(TopicInteraction::getUserId, userId)
+                        .in(TopicInteraction::getTopicId, topicIds));
+        for (TopicInteraction ti : interactions) {
+            result.computeIfAbsent(ti.getTopicId(), k -> new HashSet<>()).add(ti.getType());
+        }
+        return result;
+    }
+
     private Result<?> enrichResult(List<Topic> topics, User currentUser) {
+        Set<Integer> authorIds = new HashSet<>();
+        Set<Integer> clubIds = new HashSet<>();
+        Set<Integer> topicIds = new HashSet<>();
+        for (Topic t : topics) {
+            if (t.getAuthorId() != null) authorIds.add(t.getAuthorId());
+            if (t.getClubId() != null) clubIds.add(t.getClubId());
+            if (t.getId() != null) topicIds.add(t.getId());
+        }
+
+        Map<Integer, User> authorMap = batchLoadAuthors(authorIds);
+        Map<Integer, Club> clubMap = batchLoadClubs(clubIds);
+        Map<Integer, Set<String>> interactionMap = batchLoadUserInteractions(
+                currentUser != null ? currentUser.getId() : null, topicIds);
+
         List<Map<String, Object>> result = new ArrayList<>();
         for (Topic t : topics) {
             Map<String, Object> map = new HashMap<>();
@@ -162,27 +204,21 @@ public class TopicServiceImpl extends ServiceImpl<TopicMapper, Topic> implements
             map.put("favoritesCount", t.getFavoritesCount());
             map.put("createTime", t.getCreateTime());
 
-            User author = userMapper.selectById(t.getAuthorId());
+            User author = authorMap.get(t.getAuthorId());
             map.put("authorName", author != null ? author.getRealName() : "未知");
             map.put("authorAvatar", author != null ? author.getAvatar() : null);
 
             if (t.getClubId() != null) {
-                Club c = clubMapper.selectById(t.getClubId());
+                Club c = clubMap.get(t.getClubId());
                 map.put("clubName", c != null ? c.getName() : "未知社团");
             } else {
                 map.put("clubName", "跨社团公共");
             }
 
-            // check if currentUser liked or favorited
             if (currentUser != null) {
-                map.put("hasLiked", topicInteractionMapper.selectCount(new LambdaQueryWrapper<TopicInteraction>()
-                        .eq(TopicInteraction::getTopicId, t.getId())
-                        .eq(TopicInteraction::getUserId, currentUser.getId())
-                        .eq(TopicInteraction::getType, "LIKE")) > 0);
-                map.put("hasFavorited", topicInteractionMapper.selectCount(new LambdaQueryWrapper<TopicInteraction>()
-                        .eq(TopicInteraction::getTopicId, t.getId())
-                        .eq(TopicInteraction::getUserId, currentUser.getId())
-                        .eq(TopicInteraction::getType, "FAVORITE")) > 0);
+                Set<String> types = interactionMap.get(t.getId());
+                map.put("hasLiked", types != null && types.contains("LIKE"));
+                map.put("hasFavorited", types != null && types.contains("FAVORITE"));
             }
             result.add(map);
         }
